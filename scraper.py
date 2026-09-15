@@ -15,22 +15,27 @@ def scrape_moi_real_estate():
     print("開始下載內政部實價登錄資料...")
     url = "https://plvr.land.moi.gov.tw/DownloadSeason?season=current&type=zip&fileName=lvr_landcsv.zip"
     
-    # 加上完整的 Headers 模擬真實瀏覽器，避免被擋
+    # 強化 Headers：模擬正常瀏覽器行為與來源網頁 (Referer)，降低被政府 WAF 阻擋的機率
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://plvr.land.moi.gov.tw/DownloadOpenData',
+        'Connection': 'keep-alive'
     }
     
     try:
-        # 使用 requests 並設定 timeout
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status() # 若不是 HTTP 200 OK，會拋出例外
+        session = requests.Session()
+        response = session.get(url, headers=headers, timeout=30)
         
-        # 檢查下載的檔案內容類型是否為 zip
-        if 'application/zip' not in response.headers.get('Content-Type', '') and 'text/html' in response.headers.get('Content-Type', ''):
-             print("警告：下載的內容似乎是 HTML 而非 ZIP 壓縮檔。內政部可能暫時阻擋存取。")
-             return pd.DataFrame()
+        if response.status_code != 200:
+            print(f"內政部伺服器拒絕連線，狀態碼: {response.status_code}")
+            return pd.DataFrame()
+            
+        content_type = response.headers.get('Content-Type', '')
+        if 'text/html' in content_type or 'application/zip' not in content_type:
+            print("❌ 警告：下載到的檔案是 HTML 網頁。這通常代表 GitHub Actions 的海外 IP 被台灣內政部防火牆 (WAF) 阻擋了。")
+            return pd.DataFrame()
              
         zip_data = response.content
         
@@ -41,10 +46,10 @@ def scrape_moi_real_estate():
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
             with z.open('H_lvr_land_A.csv') as f:
-                # 略過第一行的英文欄位名
                 df = pd.read_csv(f, encoding='utf-8', skiprows=[1])
+                print("✅ 成功解壓縮並讀取桃園市實價登錄資料！")
     except zipfile.BadZipFile:
-        print("錯誤：下載成功，但檔案不是有效的 ZIP 格式 (BadZipFile)。可能抓到錯誤網頁。")
+        print("❌ 錯誤：下載的檔案不是有效的 ZIP 格式。")
         return pd.DataFrame()
     except Exception as e:
         print(f"ZIP 解壓縮或讀取 CSV 失敗: {e}")
@@ -53,7 +58,7 @@ def scrape_moi_real_estate():
     return df
 
 # ==============================================================================
-# 2. 核心商業邏輯 (維持不變)
+# 2. 核心商業邏輯
 # ==============================================================================
 def process_real_estate_data(df):
     if df.empty:
@@ -110,21 +115,23 @@ def process_real_estate_data(df):
     return summary
 
 # ==============================================================================
-# 3. Google Sheets 寫入邏輯 (已修復 update 語法)
+# 3. Google Sheets 寫入邏輯
 # ==============================================================================
 def update_google_sheet(site_name, summary_df, spreadsheet_url):
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     if not creds_json:
-        print("未設定 GOOGLE_CREDENTIALS，本地測試結果如下：")
-        print(summary_df)
+        print("未設定 GOOGLE_CREDENTIALS，跳過寫入。")
         return
 
-    creds_dict = json.loads(creds_json)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    client = gspread.authorize(creds)
-    
-    sheet = client.open_by_url(spreadsheet_url)
+    try:
+        creds_dict = json.loads(creds_json)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_url(spreadsheet_url)
+    except Exception as e:
+        print(f"Google 認證或開啟試算表失敗，請確認 JSON 金鑰與試算表共用權限: {e}")
+        return
     
     try:
         worksheet = sheet.worksheet(site_name)
@@ -139,15 +146,14 @@ def update_google_sheet(site_name, summary_df, spreadsheet_url):
         data_rows = summary_df.values.tolist()
         write_data = [[update_time_str], [], header] + data_rows
     else:
-        write_data = [[update_time_str], [], ["本期無符合條件之交易資料或下載失敗"]]
+        write_data = [[update_time_str], [], ["本期無符合條件之交易資料，或內政部網站阻擋下載"]]
         
-    # [修復] 使用具名參數 values=與 range_name= 消除 DeprecationWarning
     worksheet.update(values=write_data, range_name='A1')
     print(f"✅ [{site_name}] 資料已更新至 Google Sheet。")
 
-
 if __name__ == "__main__":
-    TARGET_SHEET_URL = "https://docs.google.com/spreadsheets/d/1PBRTc9i1AYTzXBNXxXL9u0oZixlNqxA8Htsu0gUJO18/edit"
+    # 將網址更新為您剛剛提供的新試算表連結
+    TARGET_SHEET_URL = "https://docs.google.com/spreadsheets/d/1ffi9H6GdzzlH0p0-06oAsm5_D-e_tVrZYMzrnRGMDBQ/edit"
     
     print("--- 開始執行內政部實價登錄資料爬取與分析 ---")
     raw_df = scrape_moi_real_estate()
