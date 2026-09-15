@@ -13,36 +13,39 @@ from google.oauth2.service_account import Credentials
 # ==============================================================================
 def scrape_moi_real_estate():
     print("開始下載內政部實價登錄資料...")
-    url = "https://plvr.land.moi.gov.tw/DownloadSeason?season=current&type=zip&fileName=lvr_landcsv.zip"
     
-    # 強化 Headers：模擬正常瀏覽器行為與來源網頁 (Referer)，降低被政府 WAF 阻擋的機率
+    # 內政部發布主頁 (用來拿 Cookie)
+    portal_url = "https://plvr.land.moi.gov.tw/DownloadOpenData"
+    # 真實 ZIP 下載網址
+    download_url = "https://plvr.land.moi.gov.tw/DownloadSeason?season=current&type=zip&fileName=lvr_landcsv.zip"
+    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://plvr.land.moi.gov.tw/DownloadOpenData',
-        'Connection': 'keep-alive'
+        'Referer': portal_url
     }
     
     try:
+        # 使用 Session 來保持 Cookie 狀態
         session = requests.Session()
-        response = session.get(url, headers=headers, timeout=30)
         
-        if response.status_code != 200:
-            print(f"內政部伺服器拒絕連線，狀態碼: {response.status_code}")
-            return pd.DataFrame()
-            
+        # 第一步：先拜訪主頁，取得伺服器配發的通行證 (Cookie)
+        session.get(portal_url, headers=headers, timeout=15)
+        
+        # 第二步：帶著通行證，正式發送下載 ZIP 的請求
+        response = session.get(download_url, headers=headers, timeout=30)
+        
         content_type = response.headers.get('Content-Type', '')
-        if 'text/html' in content_type or 'application/zip' not in content_type:
-            print("❌ 警告：下載到的檔案是 HTML 網頁。這通常代表 GitHub Actions 的海外 IP 被台灣內政部防火牆 (WAF) 阻擋了。")
+        if 'text/html' in content_type:
+            print("❌ 警告：下載到的仍是 HTML，內政部可能封鎖了海外 IP。")
             return pd.DataFrame()
              
         zip_data = response.content
         
     except Exception as e:
-        print(f"內政部下載連線失敗: {e}")
+        print(f"連線失敗: {e}")
         return pd.DataFrame()
 
+    # (解壓縮與讀取邏輯維持不變)
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
             with z.open('H_lvr_land_A.csv') as f:
@@ -52,7 +55,7 @@ def scrape_moi_real_estate():
         print("❌ 錯誤：下載的檔案不是有效的 ZIP 格式。")
         return pd.DataFrame()
     except Exception as e:
-        print(f"ZIP 解壓縮或讀取 CSV 失敗: {e}")
+        print(f"解壓縮失敗: {e}")
         return pd.DataFrame()
 
     return df
